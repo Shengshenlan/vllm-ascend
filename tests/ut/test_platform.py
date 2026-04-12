@@ -918,3 +918,63 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+    def test_fix_incompatible_config_load_format(self):
+        """Test that bitsandbytes load_format is properly handled."""
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+
+        # Test with unsupported bitsandbytes format
+        vllm_config.load_config = MagicMock()
+        vllm_config.load_config.load_format = "bitsandbytes"
+
+        with self.assertLogs(logger="vllm", level="WARNING") as cm:
+            self.platform._fix_incompatible_config(vllm_config)
+
+        # Check warning is logged
+        self.assertTrue(any("bitsandbytes is a NVIDIA-specific quantization format" in msg for msg in cm.output))
+
+        # Check it was reset to auto
+        self.assertEqual(vllm_config.load_config.load_format, "auto")
+
+        # Test with supported format (should not change)
+        vllm_config.load_config.load_format = "safetensors"
+        self.platform._fix_incompatible_config(vllm_config)
+        self.assertEqual(vllm_config.load_config.load_format, "safetensors")
+
+    def test_fix_incompatible_config_kv_cache_dtype(self):
+        """Test that unsupported kv_cache_dtype formats are properly handled."""
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+
+        # Test fp8_e5m2
+        vllm_config.cache_config = MagicMock()
+        vllm_config.cache_config.cache_dtype = "fp8_e5m2"
+
+        with self.assertLogs(logger="vllm", level="WARNING") as cm:
+            self.platform._fix_incompatible_config(vllm_config)
+
+        self.assertTrue(any("fp8_e5m2 is not supported on Ascend NPUs" in msg for msg in cm.output))
+        self.assertEqual(vllm_config.cache_config.cache_dtype, "fp8")
+
+        # Test fp8_inc
+        vllm_config.cache_config.cache_dtype = "fp8_inc"
+
+        with self.assertLogs(logger="vllm", level="WARNING") as cm:
+            self.platform._fix_incompatible_config(vllm_config)
+
+        self.assertTrue(any("fp8_inc is for Intel Gaudi NPUs only" in msg for msg in cm.output))
+        self.assertEqual(vllm_config.cache_config.cache_dtype, "fp8")
+
+        # Test fp8_ds_mla
+        vllm_config.cache_config.cache_dtype = "fp8_ds_mla"
+
+        with self.assertLogs(logger="vllm", level="WARNING") as cm:
+            self.platform._fix_incompatible_config(vllm_config)
+
+        self.assertTrue(any("fp8_ds_mla is for DeepSeek MLA models only" in msg for msg in cm.output))
+        self.assertEqual(vllm_config.cache_config.cache_dtype, "fp8")
+
+        # Test supported formats (should not change)
+        for supported_dtype in ["auto", "float16", "bfloat16", "fp8", "fp8_e4m3"]:
+            vllm_config.cache_config.cache_dtype = supported_dtype
+            self.platform._fix_incompatible_config(vllm_config)
+            self.assertEqual(vllm_config.cache_config.cache_dtype, supported_dtype)

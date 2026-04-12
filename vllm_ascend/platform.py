@@ -790,6 +790,17 @@ class NPUPlatform(Platform):
                 )
                 model_config.disable_cascade_attn = False
 
+        # ==================== 1.5. Load Config ====================
+        if hasattr(vllm_config, "load_config") and vllm_config.load_config:
+            # load_format compatibility check
+            load_format = getattr(vllm_config.load_config, "load_format", None)
+            if load_format == "bitsandbytes":
+                logger.warning(
+                    "bitsandbytes is a NVIDIA-specific quantization format, "
+                    "falling back to auto for Ascend"
+                )
+                vllm_config.load_config.load_format = "auto"
+
         # ==================== 2. Cache Config ====================
         if vllm_config.cache_config:
             # Check and reset cpu_kvcache_space_bytes
@@ -798,6 +809,27 @@ class NPUPlatform(Platform):
                     "Parameter 'cpu_kvcache_space_bytes' is tied to cpu backend. Resetting to None for Ascend."
                 )
                 vllm_config.cache_config.cpu_kvcache_space_bytes = None
+
+            # kv_cache_dtype compatibility check
+            cache_dtype = getattr(vllm_config.cache_config, "cache_dtype", None)
+            if cache_dtype == "fp8_e5m2":
+                logger.warning(
+                    "fp8_e5m2 is not supported on Ascend NPUs (NVIDIA/AMD-only format), "
+                    "falling back to fp8 (fp8_e4m3)"
+                )
+                vllm_config.cache_config.cache_dtype = "fp8"
+            elif cache_dtype == "fp8_inc":
+                logger.warning(
+                    "fp8_inc is for Intel Gaudi NPUs only, "
+                    "falling back to fp8 (fp8_e4m3) for Ascend"
+                )
+                vllm_config.cache_config.cache_dtype = "fp8"
+            elif cache_dtype == "fp8_ds_mla":
+                logger.warning(
+                    "fp8_ds_mla is for DeepSeek MLA models only, "
+                    "falling back to fp8 (fp8_e4m3) for general use"
+                )
+                vllm_config.cache_config.cache_dtype = "fp8"
 
         # ==================== 3. MultiModal Config ====================
         multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
