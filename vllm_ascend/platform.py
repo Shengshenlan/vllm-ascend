@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import os
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -51,6 +52,7 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
+    from torch.distributed import PrefixStore, ProcessGroup
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
 else:
@@ -866,3 +868,64 @@ class NPUPlatform(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
+
+    @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        """Get the total memory of a device in bytes."""
+        _, total = torch.npu.mem_get_info(device_id)
+        return total
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        """Set RNG seed across all devices for the current platform."""
+        torch.npu.manual_seed_all(seed)
+
+    @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: "PrefixStore",
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> "ProcessGroup":
+        """Init platform-specific torch distributed process group."""
+        # TODO: Implement HCCL-based distributed process group initialization
+        raise NotImplementedError(
+            "stateless_init_device_torch_dist_pg is not implemented for NPU platform yet."
+        )
+
+    @classmethod
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
+        """Check if the dtype is supported by the current platform."""
+        supported_dtypes = [torch.float32, torch.float16, torch.bfloat16]
+        if dtype not in supported_dtypes:
+            raise ValueError(
+                f"{dtype} is currently not supported in {cls.device_name}. "
+                f"Supported dtypes are: {supported_dtypes}."
+            )
+
+    @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        """
+        Get the number of compute units for the current platform.
+        For Ascend NPU, this returns the number of AI Cores (AIC).
+        """
+        # Try to get from torch.npu.get_device_properties first
+        try:
+            props = torch.npu.get_device_properties(device_id)
+            # Try common property names for compute units
+            if hasattr(props, "multi_processor_count"):
+                return props.multi_processor_count
+            if hasattr(props, "npu_count"):
+                return props.npu_count
+            if hasattr(props, "num_aic"):
+                return props.num_aic
+            if hasattr(props, "ai_core_count"):
+                return props.ai_core_count
+        except Exception:
+            pass
+
+        raise NotImplementedError(
+            "num_compute_units is not implemented for the current NPU platform."
+        )
