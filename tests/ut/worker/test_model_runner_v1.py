@@ -146,5 +146,53 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
 
 
+class TestNPUModelRunnerMMEncoderOnly(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.device = torch.device("cpu")
+        runner.vllm_config = MagicMock()
+        runner.vllm_config.model_config = MagicMock()
+        runner.vllm_config.model_config.multimodal_config = SimpleNamespace(mm_encoder_only=True)
+        runner.model_config = MagicMock()
+        runner.model_config.multimodal_config = runner.vllm_config.model_config.multimodal_config
+        return runner
+
+    def test_dummy_run_returns_empty_tensors_for_mm_encoder_only(self):
+        runner = self._build_runner()
+
+        hidden_states, last_hidden_states = runner._dummy_run(num_tokens=8)
+
+        self.assertEqual(hidden_states.numel(), 0)
+        self.assertEqual(last_hidden_states.numel(), 0)
+
+    def test_dummy_sampler_run_returns_empty_tensor_for_mm_encoder_only(self):
+        runner = self._build_runner()
+        hidden_states = torch.randn(4, 8)
+
+        output = runner._dummy_sampler_run(hidden_states)
+
+        self.assertEqual(output.numel(), 0)
+
+    @patch("vllm_ascend.worker.model_runner_v1.GPUModelRunner.profile_run")
+    @patch("vllm_ascend.worker.model_runner_v1.get_mc2_tokens_capacity", return_value=1024)
+    @patch("vllm_ascend.worker.model_runner_v1.select_moe_comm_method", return_value=None)
+    def test_profile_run_keeps_parent_profiling_for_mm_encoder_only(
+        self,
+        _mock_select_moe_comm_method,
+        _mock_get_mc2_tokens_capacity,
+        mock_super_profile_run,
+    ):
+        runner = self._build_runner()
+        runner.eplb_warmup = MagicMock()
+        runner.max_num_tokens = 128
+        runner.pcp_size = 1
+
+        runner.profile_run()
+
+        runner.eplb_warmup.assert_called_once_with()
+        mock_super_profile_run.assert_called_once_with()
+        self.assertEqual(runner.max_num_tokens, 128)
+
+
 if __name__ == "__main__":
     unittest.main()
