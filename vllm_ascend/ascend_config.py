@@ -50,6 +50,8 @@ class AscendConfig:
         weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
 
+        self.weight_offload_config = WeightOffloadConfig(vllm_config)
+
         profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
         self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
         if self.profiling_chunk_config.enabled and vllm_config.parallel_config.pipeline_parallel_size <= 1:
@@ -451,6 +453,41 @@ class WeightPrefetchConfig:
     def __init__(self, weight_prefetch_config: dict):
         self.enabled = weight_prefetch_config.get("enabled", False)
         self.prefetch_ratio = weight_prefetch_config.get("prefetch_ratio", self.prefetch_ratio)
+
+
+class WeightOffloadConfig:
+    """Raw coordination state for CPU/NPU weight offload requests.
+
+    Full compatibility validation is intentionally kept in
+    create_ascend_offloader(), after platform config normalization completes.
+    """
+
+    def __init__(self, vllm_config: "VllmConfig"):
+        offload_config = getattr(vllm_config, "offload_config", None)
+        self.enabled = False
+        self.backend = None
+        self.group_size = 0
+        self.num_in_group = 1
+        self.prefetch_step = 1
+        self.disabled_reason: str | None = None
+
+        if offload_config is None:
+            self.disabled_reason = "offload_config is not set"
+            return
+
+        self.backend = offload_config.offload_backend
+        prefetch = offload_config.prefetch
+        self.group_size = prefetch.offload_group_size
+        self.num_in_group = prefetch.offload_num_in_group
+        self.prefetch_step = prefetch.offload_prefetch_step
+
+        if self.backend not in ("auto", "prefetch"):
+            self.disabled_reason = f"offload backend {self.backend!r} is not active"
+            return
+
+        self.enabled = self.group_size > 0
+        if not self.enabled:
+            self.disabled_reason = "prefetch backend has offload_group_size=0"
 
 
 class ProfilingChunkConfig:

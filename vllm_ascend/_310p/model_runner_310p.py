@@ -40,6 +40,7 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.offloader.factory import resolve_ascend_offload_config
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -52,6 +53,9 @@ class NPUModelRunner310(NPUModelRunner):
     uniform_decode_query_len: int
 
     def __init__(self, *args, **kwargs):
+        vllm_config = args[0] if args else kwargs.get("vllm_config")
+        if vllm_config is not None:
+            resolve_ascend_offload_config(vllm_config, is_310p=True)
         super().__init__(*args, **kwargs)
         self.input_batch = NPUInputBatch(
             max_num_reqs=self.max_num_reqs,
@@ -474,11 +478,12 @@ class NPUModelRunner310(NPUModelRunner):
                 self.kernel_block_sizes.append([0])
 
         if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:
-            assert self.offload_config.uva.cpu_offload_gb == 0, (
-                "Cannot re-initialize the input batch when CPU weight "
-                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
-                "for more details."
-            )
+            if getattr(self, "weight_offload_active", False):
+                raise AssertionError(
+                    "Cannot re-initialize the input batch when Ascend CPU/NPU "
+                    "weight offloading is enabled. See "
+                    "https://github.com/vllm-project/vllm/pull/18298 for more details."
+                )
             self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max(self.model_config.max_model_len, self.max_encoder_len),

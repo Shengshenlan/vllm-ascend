@@ -15,7 +15,7 @@
 
 from unittest.mock import patch
 
-from vllm.config import VllmConfig
+from vllm.config import OffloadConfig, PrefetchOffloadConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, get_ascend_config, init_ascend_config
@@ -45,6 +45,7 @@ class TestAscendConfig(TestBase):
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertTrue(ascend_fusion_config.fusion_ops_gmmswigluquant)
+        self.assertFalse(ascend_config.weight_offload_config.enabled)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
@@ -74,6 +75,21 @@ class TestAscendConfig(TestBase):
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_init_ascend_config_with_weight_offload_config(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.offload_config = OffloadConfig(
+            prefetch=PrefetchOffloadConfig(offload_group_size=2)
+        )
+        clear_ascend_config()
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.weight_offload_config.enabled)
+        self.assertEqual(ascend_config.weight_offload_config.backend, "auto")
+        self.assertEqual(ascend_config.weight_offload_config.group_size, 2)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")

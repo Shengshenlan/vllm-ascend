@@ -44,6 +44,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.offloader import NoopOffloader, get_offloader, set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
@@ -110,6 +111,7 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoa
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
+from vllm_ascend.offloader import create_ascend_offloader, is_weight_offload_enabled
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
@@ -228,6 +230,7 @@ class ExecuteModelState(NamedTuple):
 
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        ascend_weight_offloader = create_ascend_offloader(vllm_config)
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
         # used to expand some buffers, which need to be reverted after
         # the following PR is merged:
@@ -238,6 +241,10 @@ class NPUModelRunner(GPUModelRunner):
         vllm_config.scheduler_config.max_num_batched_tokens += max_pcp_pad_tokens
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+
+        self.weight_offloader = ascend_weight_offloader
+        set_offloader(self.weight_offloader)
+        self.weight_offload_active = is_weight_offload_enabled(self.weight_offloader)
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -268,7 +275,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
-        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
+        self._setup_weight_prefetch_method()
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
         self.debugger = None
@@ -562,6 +569,20 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(self.model, ACLGraphWrapper):
             return self.model.unwrap()
         return self.model
+
+    def _setup_weight_prefetch_method(self) -> None:
+        if self.weight_offload_active and self.ascend_config.weight_prefetch_config.enabled:
+            logger.warning(
+                "Ascend CPU/NPU weight offloading is enabled; disabling "
+                "weight_prefetch_config because resident-weight prefetch can "
+                "conflict with CPU weight H2D prefetch."
+            )
+            self.ascend_config.weight_prefetch_config.enabled = False
+        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
+
+    def __del__(self):
+        if getattr(self, "weight_offload_active", False):
+            set_offloader(NoopOffloader())
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -2976,6 +2997,8 @@ class NPUModelRunner(GPUModelRunner):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
+        get_offloader().post_init()
+
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
@@ -3520,11 +3543,12 @@ class NPUModelRunner(GPUModelRunner):
             max_num_blocks.append(max_num_blocks_per_req)
 
         if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:
-            assert self.offload_config.uva.cpu_offload_gb == 0, (
-                "Cannot re-initialize the input batch when CPU weight "
-                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
-                "for more details."
-            )
+            if getattr(self, "weight_offload_active", False):
+                raise AssertionError(
+                    "Cannot re-initialize the input batch when Ascend CPU/NPU "
+                    "weight offloading is enabled. See "
+                    "https://github.com/vllm-project/vllm/pull/18298 for more details."
+                )
             self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max_model_len,

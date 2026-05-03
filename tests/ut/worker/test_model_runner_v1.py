@@ -84,6 +84,53 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
 
 
+class TestNPUModelRunnerWeightOffload(unittest.TestCase):
+    def test_reinitialize_input_batch_rejects_active_weight_offload(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.cache_config = SimpleNamespace(block_size=8, enable_prefix_caching=False)
+        runner.kernel_block_sizes = [[8]]
+        runner.weight_offload_active = True
+        runner.pcp_size = 1
+        runner.attn_groups = []
+        runner.use_hybrid_blocks = False
+        runner.max_model_len = 32
+        runner.max_encoder_len = 0
+
+        kv_cache_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=64,
+            head_size_v=64,
+            dtype=torch.float16,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["layer.0"],
+                    kv_cache_spec=kv_cache_spec,
+                )
+            ],
+        )
+
+        with self.assertRaisesRegex(AssertionError, "Ascend CPU/NPU weight offloading"):
+            runner.may_reinitialize_input_batch(kv_cache_config)
+
+    @patch("vllm_ascend.worker.model_runner_v1.set_weight_prefetch_method")
+    def test_weight_offload_disables_resident_weight_prefetch(self, mock_set_weight_prefetch_method):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.weight_offload_active = True
+        runner.ascend_config = SimpleNamespace(
+            weight_prefetch_config=SimpleNamespace(enabled=True),
+        )
+
+        runner._setup_weight_prefetch_method()
+
+        self.assertFalse(runner.ascend_config.weight_prefetch_config.enabled)
+        mock_set_weight_prefetch_method.assert_called_once()
+
+
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
